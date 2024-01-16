@@ -9,7 +9,6 @@ use std::thread;
 use std::time::Duration;
 
 use ctrlc;
-use chrono;
 use chrono::prelude::{DateTime, Local};
 
 fn main() {
