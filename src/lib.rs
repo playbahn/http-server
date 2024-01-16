@@ -76,10 +76,9 @@ impl Drop for ThreadPool {
                 // A `Worker` instance can panic because its `thread` field
                 // calls `Job` [ `Box<dyn FnOnce() + Send + 'static>` ],
                 // which is a construct foreign to this library
-                thread.join().expect(&format!(
-                    "Worker {} panicked while Dropping Threadpool",
-                    worker.id
-                ));
+                thread.join().unwrap_or_else(|_| 
+                    panic!("Worker {} panicked while Dropping Threadpool",worker.id)
+                );
             }
         }
     }

@@ -8,11 +8,10 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use ctrlc;
 use chrono::prelude::{DateTime, Local};
 
 fn main() {
-    let server_init_datetime: DateTime<Local> = Local::now();
+    let server_init_timestamp: DateTime<Local> = Local::now();
 
     let logbuf: Arc<Mutex<BufWriter<File>>> =
         Arc::new(Mutex::new(BufWriter::new(match File::options()
@@ -20,26 +19,24 @@ fn main() {
             .open("server.log") {
                 Ok(file) => file,
                 Err(e) => panic!("Error opening log file [server.log]: {:#?}", e.kind()),
-            })));
+    })));
 
-    let sigint_handler_logbuf: Arc<Mutex<BufWriter<File>>> = Arc::clone(&logbuf);
+    let sigint_logbuf: Arc<Mutex<BufWriter<File>>> = Arc::clone(&logbuf);
 
-    {
-        match logbuf.lock() {
-            Ok(mut logbuf) => {
-                if let Err(e) = logbuf.write_all(
-                    format!("[{}] SERVER INIT\n", server_init_datetime).as_bytes()
-                ) {
-                    eprintln!("SERVER INIT LOG ERROR: {:#?}", e.kind());
-                } else {
-                    if let Err(e) = logbuf.flush() {
-                        eprintln!("SERVER INIT LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                    };
-                };
-            },
-            Err(_) => panic!("UNEXPECTED ERROR WHILE LOCKING ON LOGFILE BUFFER"),
-        };
-    }
+    match logbuf.lock() {
+        Ok(mut logbuf) => {
+            if let Err(e) = logbuf.write_all(
+                format!("[{}] SERVER INIT\n\n", server_init_timestamp).as_bytes()
+            ) {
+                eprintln!("SERVER INIT LOG ERROR: {:#?}", e.kind());
+            } else if let Err(e) = logbuf.flush() {
+                eprintln!("SERVER INIT LOG WRITE FLUSH ERROR: {:#?}", e.kind());
+            };
+
+            print!("[{}] SERVER INIT\n\n", server_init_timestamp);
+        },
+        Err(_) => panic!("UNEXPECTED ERROR WHILE LOCKING ON LOGFILE BUFFER"),
+    };
 
     let server_socket_addr: &str = "127.0.0.1:7878";
     let tcp_listener: TcpListener = match TcpListener::bind(server_socket_addr) {
@@ -55,7 +52,7 @@ fn main() {
     ctrlc::set_handler(move || {
         sigint_set.store(true, sync::atomic::Ordering::SeqCst);
 
-        let mut sigint_handler_logbuf: MutexGuard<'_, BufWriter<File>> = match sigint_handler_logbuf.lock() {
+        let mut sigint_logbuf: MutexGuard<'_, BufWriter<File>> = match sigint_logbuf.lock() {
             Ok(logbuf) => logbuf,
             Err(poison_err) => {
                 eprintln!("SIGINT handler: BufWriter<server.log> PoisonError. Logging nonetheless.");
@@ -63,72 +60,66 @@ fn main() {
             },
         };
 
-        // connect to same socket our server is listening on, so that we send a dupe request,
-        // after obviously setting loop condition variable `sigint_retrieve` to false
+        // connect to same socket our server is listening on, so that we send a (dupe) shutdown request,
+        // after obviously setting loop condition variable [`sigint_retrieve`] to false
         match TcpStream::connect(server_socket_addr) {
             Ok(mut send_stream) => {
-                let dupe_rqst: &str = "SIGINT HANDLER SERVER SHUTDOWN REQUEST\n";
+                let shutdown_request: &str = "SIGINT HANDLER SERVER SHUTDOWN REQUEST\r\n";
 
                 match send_stream.write_all(
-                    dupe_rqst.as_bytes()
+                    shutdown_request.as_bytes()
                 ) {
                     Ok(()) => {
-                        let dupe_rqst_log_msg_success_datetime: DateTime<Local> = Local::now();
-                        let dupe_rqst_log_msg_success: String = format!("SIGINT handler: Dupe request sent for server shutdown:\n\t{dupe_rqst}\n\n");
+                        let shutdown_request_success_timestamp: DateTime<Local> = Local::now();
+                        let shutdown_request_success_log: String = format!("SIGINT handler: Dupe request sent for server shutdown:\n\t{shutdown_request}\n");
 
-                        if let Err(e) = sigint_handler_logbuf.write_all(
-                            format!("[{dupe_rqst_log_msg_success_datetime}] {dupe_rqst_log_msg_success}").as_bytes()
+                        if let Err(e) = sigint_logbuf.write_all(
+                            format!("[{shutdown_request_success_timestamp}] {shutdown_request_success_log}").as_bytes()
                         ) {
                             eprintln!("SIGINT handler: ERROR LOGGING DUPE REQUEST MESSAGE: {:#?}", e.kind());
-                        } else {
-                            if let Err(e) = sigint_handler_logbuf.flush() {
-                                eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
-                            };
+                        } else if let Err(e) = sigint_logbuf.flush() {
+                            eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
                         };
 
-                        print!("[{dupe_rqst_log_msg_success_datetime}] {dupe_rqst_log_msg_success}");
+                        print!("[{shutdown_request_success_timestamp}] {shutdown_request_success_log}");
                     },
                     Err(e) => {
-                        let dupe_rqst_log_msg_failure_datetime: DateTime<Local> = Local::now();
-                        let dupe_rqst_log_msg_failure: String = format!(
-                            "[{dupe_rqst_log_msg_failure_datetime}] SIGINT handler: Couldn't send server shutdown request: {:#?}\n", e.kind()
+                        let shutdown_request_failure_timestamp: DateTime<Local> = Local::now();
+                        let shutdown_request_failure_log: String = format!(
+                            "[{shutdown_request_failure_timestamp}] SIGINT handler: Couldn't send server shutdown request: {:#?}\n", e.kind()
                         );
                         
-                        if let Err(e) = sigint_handler_logbuf.write_all(
-                            dupe_rqst_log_msg_failure.as_bytes()
+                        if let Err(e) = sigint_logbuf.write_all(
+                            shutdown_request_failure_log.as_bytes()
                         ) {
                             eprintln!("SIGINT handler: ERROR LOGGING FAILED DUPE REQUEST MESSAGE: {:#?}", e.kind());
-                        } else {
-                            if let Err(e) = sigint_handler_logbuf.flush() {
-                                eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING FAILED SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
-                            };
+                        } else if let Err(e) = sigint_logbuf.flush() {
+                            eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING FAILED SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
                         };
 
-                        eprintln!("[{dupe_rqst_log_msg_failure_datetime}] {dupe_rqst_log_msg_failure}");
+                        eprintln!("[{shutdown_request_failure_timestamp}] {shutdown_request_failure_log}");
                     },
                 };
             },
             Err(e) => {
-                let localhost_conn_err_datetime: DateTime<Local> = Local::now();
-                let localhost_conn_err: String = format!("[{localhost_conn_err_datetime}] SIGINT handler: ERROR CONNECTING TO LOCALHOST: {:#?}\n", e.kind());
+                let localhost_conn_err_timestamp: DateTime<Local> = Local::now();
+                let localhost_conn_err_log: String = format!("[{localhost_conn_err_timestamp}] SIGINT handler: ERROR CONNECTING TO LOCALHOST: {:#?}\n", e.kind());
                 
-                if let Err(e) = sigint_handler_logbuf.write_all(
-                    localhost_conn_err.as_bytes()
+                if let Err(e) = sigint_logbuf.write_all(
+                    localhost_conn_err_log.as_bytes()
                 ) {
                     eprintln!("SIGINT handler: ERROR LOGGING FAILED DUPE REQUEST MESSAGE: {:#?}", e.kind());
-                } else {
-                    if let Err(e) = sigint_handler_logbuf.flush() {
-                        eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING FAILED SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
-                    };
+                } else if let Err(e) = sigint_logbuf.flush() {
+                    eprintln!("SIGINT handler: FLUSH ERROR WHILE LOGGING FAILED SERVER SHUTDOWN REQUEST: {:#?}", e.kind());
                 };
 
-                eprintln!("[{localhost_conn_err_datetime}] {localhost_conn_err}");
+                eprintln!("[{localhost_conn_err_timestamp}] {localhost_conn_err_log}");
             },
         };
-    }).expect(&format!("Error setting SIGINT handler."));
+    }).expect("Error setting SIGINT handler.");
 
     for stream in tcp_listener.incoming() {
-        let request_datetime: DateTime<Local> = Local::now();
+        let request_timestamp: DateTime<Local> = Local::now();
         
         if sigint_retrieve.load(sync::atomic::Ordering::SeqCst) {
             // loop exit ultimately ends main(), calling `Drop for ThreadPool`
@@ -139,44 +130,62 @@ fn main() {
             Ok(tcp_stream) => tcp_stream,
 
             Err(e) => {
-                let tcp_stream_encountered_io_datetime: DateTime<Local> = Local::now();
+                let tcp_stream_encountered_io_timestamp: DateTime<Local> = Local::now();
 
-                let err: String = format!("[{tcp_stream_encountered_io_datetime}] ENCOUNTERED IO ERROR: {:#?}", e.kind());
-                eprintln!("[{tcp_stream_encountered_io_datetime}] {err}");
+                let err: String = format!("[{tcp_stream_encountered_io_timestamp}] ENCOUNTERED IO ERROR: {:#?}", e.kind());
+                eprintln!("[{tcp_stream_encountered_io_timestamp}] {err}");
 
-                let mut logbuf: MutexGuard<'_, BufWriter<File>> = match logbuf.lock() {
-                    Ok(logbuf) => logbuf,
-                    Err(poison_err) => {
-                        eprintln!("TcpStream iterator: BufWriter<server.log> PoisonError. Logging nonetheless.");
-                        poison_err.into_inner()
-                    },
-                };
-
-                if let Err(e) = logbuf.write_all(
-                    format!("{err} in incoming TcpStream\n").as_bytes()
-                ) {
-                    eprintln!("Incoming TcpStream encountered IO error LOG ERROR: {:#?}", e.kind());
-                } else {
-                    if let Err(e) = logbuf.flush() {
+                {
+                    let mut logbuf: MutexGuard<'_, BufWriter<File>> = match logbuf.lock() {
+                        Ok(logbuf) => logbuf,
+                        Err(poison_err) => {
+                            eprintln!("TcpStream iterator: BufWriter<server.log> PoisonError. Logging nonetheless.");
+                            poison_err.into_inner()
+                        },
+                    };
+    
+                    if let Err(e) = logbuf.write_all(
+                        format!("{err} in incoming TcpStream\n").as_bytes()
+                    ) {
+                        eprintln!("Incoming TcpStream encountered IO error LOG ERROR: {:#?}", e.kind());
+                    } else if let Err(e) = logbuf.flush() {
                         eprintln!("Incoming TcpStream encountered IO error LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                     };
-                };
+                }
 
                 continue;
             },
         };
 
-        let logbuf: Arc<Mutex<BufWriter<File>>> = Arc::clone(&logbuf);
+        let conn_logbuf: Arc<Mutex<BufWriter<File>>> = Arc::clone(&logbuf);
 
         pool.execute(move || {
-            handle_connection(stream, logbuf, request_datetime);
+            handle_connection(stream, conn_logbuf, request_timestamp);
         });
     }
 
-    println!("[{}] Shutting down.", Local::now());
+    let mut logbuf: MutexGuard<'_, BufWriter<File>> = match logbuf.lock() {
+        Ok(logbuf) => logbuf,
+        Err(poison_err) => {
+            eprintln!("Connection handler: BufWriter<server.log> PoisonError. Logging nonetheless.");
+            poison_err.into_inner()
+        },
+    };
+
+    let server_shutdown_timestamp: DateTime<Local> = Local::now();
+
+    if let Err(e) = logbuf.write_all(
+        format!("[{}] SERVER SHUTDOWN\n\n", server_init_timestamp).as_bytes()
+    ) {
+        eprintln!("SERVER SHUTDOWN LOG ERROR: {:#?}", e.kind());
+    } else if let Err(e) = logbuf.flush() {
+        eprintln!("SERVER SHUTDOWN LOG WRITE FLUSH ERROR: {:#?}", e.kind());
+    };
+
+    print!("[{}] SERVER SHUTDOWN\n\n", server_shutdown_timestamp);
 }
 
-fn handle_connection(mut stream: TcpStream, logbuf: Arc<Mutex<BufWriter<File>>>, request_datetime: DateTime<Local>) {
+fn handle_connection(mut stream: TcpStream, logbuf: Arc<Mutex<BufWriter<File>>>, request_timestamp: DateTime<Local>) {
     let buf_reader: BufReader<&mut TcpStream> = BufReader::new(&mut stream);
 
     let http_request: Vec<String> = buf_reader
@@ -196,7 +205,7 @@ fn handle_connection(mut stream: TcpStream, logbuf: Arc<Mutex<BufWriter<File>>>,
         .collect();
     
     match http_request.iter().peekable().peek() {
-        None => eprintln!("[{request_datetime}] REQUEST ERROR: Blank Request"),
+        None => eprintln!("[{request_timestamp}] REQUEST ERROR: Blank Request"),
 
         Some(request_line) => {
             let (status_line, filename): (&str, &str) = match &request_line[..] {
@@ -230,26 +239,22 @@ fn handle_connection(mut stream: TcpStream, logbuf: Arc<Mutex<BufWriter<File>>>,
                 };
 
                 if let Err(e) = logbuf.write_all(
-                    format!("[{request_datetime}] Connection handler: Request:\n").as_bytes()
+                    format!("[{request_timestamp}] Connection handler: Request:\n").as_bytes()
                 ) {
                     eprintln!("Connection handler: HTTP REQUEST LOG ERROR: {:#?}", e.kind());
-                } else {
-                    if let Err(e) = logbuf.flush() {
-                        eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                    };
+                } else if let Err(e) = logbuf.flush() {
+                    eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                 };
 
-                print!("[{request_datetime}] Connection handler: Request:\n");
+                print!("[{request_timestamp}] Connection handler: Request:\n");
 
                 for line in &http_request {
                     if let Err(e) = logbuf.write_all(
                         format!("{line}\n").as_bytes()
                     ) {
                         eprintln!("Connection handler: HTTP REQUEST LOG ERROR: {:#?}", e.kind());
-                    } else {
-                        if let Err(e) = logbuf.flush() {
-                            eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                        };
+                    } else if let Err(e) = logbuf.flush() {
+                        eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                     };
 
                     println!("{line}");
@@ -259,43 +264,37 @@ fn handle_connection(mut stream: TcpStream, logbuf: Arc<Mutex<BufWriter<File>>>,
                     "\n".as_bytes()
                 ) {
                     eprintln!("Connection handler: HTTP REQUEST LOG ERROR: {:#?}", e.kind());
-                } else {
-                    if let Err(e) = logbuf.flush() {
-                        eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                    };
+                } else if let Err(e) = logbuf.flush() {
+                    eprintln!("Connection handler: HTTP REQUEST LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                 };
 
                 match stream.write_all(
                     response.as_bytes()
                 ) {
                     Ok(()) => {
-                        let response_datetime: DateTime<Local> = Local::now();
-                        let response_ok: String = format!("[{response_datetime}] Connection handler: Response:\n{}\n", response);
+                        let response_timestamp: DateTime<Local> = Local::now();
+                        let response_ok: String = format!("[{response_timestamp}] Connection handler: Response:\n{}\n", response);
                         
                         if let Err(e) = logbuf.write_all(
                             response_ok.as_bytes()
                         ) {
                             eprintln!("Connection handler: HTTP RESPONSE LOG ERROR: {:#?}", e.kind());
-                        } else {
-                            if let Err(e) = logbuf.flush() {
-                                eprintln!("Connection handler: HTTP RESPONSE LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                            };
+                        } else if let Err(e) = logbuf.flush() {
+                            eprintln!("Connection handler: HTTP RESPONSE LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                         };
 
                         print!("\n{response_ok}");
                     },
                     Err(e) => {
-                        let response_err_datetime: DateTime<Local> = Local::now();
-                        let response_err: String = format!("[{response_err_datetime}] Connection handler: Error writing response to the stream: {:#?}\n", e.kind());
+                        let response_err_timestamp: DateTime<Local> = Local::now();
+                        let response_err: String = format!("[{response_err_timestamp}] Connection handler: Error writing response to the stream: {:#?}\n", e.kind());
 
                         if let Err(e) = logbuf.write_all(
                             response_err.as_bytes()
                         ) {
                             eprintln!("Connection handler: HTTP FAILED RESPONSE LOG ERROR: {:#?}", e.kind());
-                        } else {
-                            if let Err(e) = logbuf.flush() {
-                                eprintln!("Connection handler: HTTP FAILED RESPONSE LOG WRITE FLUSH ERROR: {:#?}", e.kind());
-                            };
+                        } else if let Err(e) = logbuf.flush() {
+                            eprintln!("Connection handler: HTTP FAILED RESPONSE LOG WRITE FLUSH ERROR: {:#?}", e.kind());
                         };
 
                         eprint!("\n{response_err}");
