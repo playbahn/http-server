@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Receiver, RecvError, Sender};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread;
+use std::thread::JoinHandle;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -31,13 +31,11 @@ impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
-        let (sender, receiver): (Sender<Job>, Receiver<Job>) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<Job>();
         let receiver: Arc<Mutex<Receiver<Job>>> = Arc::new(Mutex::new(receiver));
         let mut workers: Vec<Worker> = Vec::with_capacity(size);
 
-        for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&receiver)));
-        }
+        (0..size).for_each(|id| workers.push(Worker::new(id, Arc::clone(&receiver))));
 
         ThreadPool {
             workers,
@@ -47,19 +45,11 @@ impl ThreadPool {
 
     /// Register a function or closure `f` to be run using any arbitrary thread from pool `self`,
     /// `f` gets run when a thread is free to pick up `f`
-    pub fn execute<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        let job: Job = Box::new(f);
-
+    pub fn execute<F: FnOnce() + Send + 'static>(&self, f: F) {
         match &self.sender {
-            Some(sender) => match sender.send(job) {
-                Ok(()) => {}
-
-                Err(_) => eprintln!("Threadpool shutdown. Receiver(s) dead."),
-            },
-
+            Some(sender) => sender
+                .send(Box::new(f))
+                .unwrap_or_else(|e| eprintln!("{e}")),
             None => eprintln!("Sender dead."),
         }
     }
@@ -70,15 +60,15 @@ impl Drop for ThreadPool {
         drop(self.sender.take());
 
         for worker in &mut self.workers {
-            println!("Shutting down worker {}", worker.id);
-
+            eprintln!("Shutting down worker {}", worker.id);
+            
             if let Some(thread) = worker.thread.take() {
                 // A `Worker` instance can panic because its `thread` field
-                // calls `Job` [ `Box<dyn FnOnce() + Send + 'static>` ],
+                // calls `Job` [`Box<dyn FnOnce() + Send + 'static>`],
                 // which is a construct foreign to this library
-                thread.join().unwrap_or_else(|_| 
-                    panic!("Worker {} panicked while Dropping Threadpool",worker.id)
-                );
+                if thread.join().is_err() {
+                    panic!("Worker {} panicked while Dropping Threadpool", worker.id)
+                }
             }
         }
     }
@@ -86,29 +76,25 @@ impl Drop for ThreadPool {
 
 struct Worker {
     id: usize,
-    thread: Option<thread::JoinHandle<()>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Job>>>) -> Worker {
-        let thread: thread::JoinHandle<()> = thread::spawn(move || {
-            loop {
-                let message: Result<Box<dyn FnOnce() + Send>, RecvError> = receiver
-                    .lock()
-                    .expect("Last thread holding lock panicked")
-                    .recv();
+        let thread: JoinHandle<()> = std::thread::spawn(move || loop {
+            let job: Result<Job, RecvError> = receiver
+                .lock()
+                .expect("Last thread holding lock panicked")
+                .recv();
 
-                match message {
-                    Ok(job) => {
-                        println!("Worker {id} got a job, executing.");
-
-                        job();
-                    }
-
-                    Err(_) => {
-                        println!("Worker {id} disconnected, shutting down.");
-                        break; // breaks `loop { }`
-                    }
+            match job {
+                Ok(job) => {
+                    eprintln!("Worker {id} got a job, executing.");
+                    job();
+                }
+                Err(_) => {
+                    eprintln!("Worker {id} disconnected, shutting down.");
+                    break;
                 }
             }
         });
