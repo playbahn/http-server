@@ -28,14 +28,14 @@ impl ThreadPool {
     ///
     /// let pool = ThreadPool::new(4);
     /// ```
-    pub fn new(size: usize) -> ThreadPool {
+    pub fn new(size: u8) -> ThreadPool {
         assert!(size > 0);
 
         let (sender, receiver) = mpsc::channel::<Job>();
         let receiver: Arc<Mutex<Receiver<Job>>> = Arc::new(Mutex::new(receiver));
-        let mut workers: Vec<Worker> = Vec::with_capacity(size);
+        let mut workers: Vec<Worker> = Vec::with_capacity(size as usize);
 
-        (0..size).for_each(|id| workers.push(Worker::new(id, Arc::clone(&receiver))));
+        (0..size as usize).for_each(|id| workers.push(Worker::new(id, Arc::clone(&receiver))));
 
         ThreadPool {
             workers,
@@ -47,11 +47,11 @@ impl ThreadPool {
     /// `f` gets run when a thread is free to pick up `f`
     pub fn execute<F: FnOnce() + Send + 'static>(&self, f: F) {
         match &self.sender {
-            Some(sender) => sender
-                .send(Box::new(f))
-                .unwrap_or_else(|e| eprintln!("{e}")),
+            Some(sender) => {
+                let _ = sender.send(Box::new(f)).inspect_err(|e| eprintln!("{e}"));
+            }
             None => eprintln!("Sender dead."),
-        }
+        };
     }
 }
 
@@ -61,7 +61,7 @@ impl Drop for ThreadPool {
 
         for worker in &mut self.workers {
             eprintln!("Shutting down worker {}", worker.id);
-            
+
             if let Some(thread) = worker.thread.take() {
                 // A `Worker` instance can panic because its `thread` field
                 // calls `Job` [`Box<dyn FnOnce() + Send + 'static>`],
